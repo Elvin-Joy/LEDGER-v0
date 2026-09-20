@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from datetime import date
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
 from app.db.models import Expense, User
 from app.auth.security import get_current_user
-from app.expenses.schemas import ExpenseCreate, ExpenseResponse
+from app.expenses.schemas import ExpenseCreate, ExpenseResponse, ExpenseSummaryResponse
 
 router = APIRouter(
     prefix="/expenses",
@@ -33,15 +34,96 @@ def create_expense(
 
 @router.get("/", response_model=list[ExpenseResponse])
 def get_expenses(
+    category: str | None = None,
+    date: date | None = None,
+    sort_by: str | None = Query(
+        default=None,
+        pattern="^(amount|date|id)$"
+    ),
+    order: str = Query(
+        default="desc",
+        pattern="^(asc|desc)$"
+    ),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=10, ge=1, le=100),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    expenses = db.query(Expense).filter(
+    expenses_query = db.query(Expense).filter(
         Expense.user_id == current_user.id
-    ).all()
+    )
+
+    if category:
+        expenses_query = expenses_query.filter(
+            Expense.category == category
+        )
+
+
+    if date:
+        expenses_query = expenses_query.filter(
+            Expense.date == date
+    )
+
+    if sort_by == "amount":
+        expenses_query = expenses_query.order_by(
+            Expense.amount.desc() if order == "desc" else Expense.amount.asc()
+    )
+
+    elif sort_by == "date":
+        expenses_query = expenses_query.order_by(
+            Expense.date.desc() if order == "desc" else Expense.date.asc()
+    )
+
+    elif sort_by == "id":
+        expenses_query = expenses_query.order_by(
+            Expense.id.desc() if order == "desc" else Expense.id.asc()
+    )
+
+    expenses = expenses_query.offset(skip).limit(limit).all()
 
     return expenses
 
+@router.get("/summary", response_model=ExpenseSummaryResponse)
+def get_expense_summary(
+    start_date: date | None = None,
+    end_date: date | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    expenses_query = db.query(Expense).filter(
+        Expense.user_id == current_user.id
+    )
+
+    if start_date:
+        expenses_query = expenses_query.filter(
+            Expense.date >= start_date
+        )
+    if end_date:
+        expenses_query = expenses_query.filter(
+            Expense.date <= end_date
+        )
+    expenses = expenses_query.all()
+
+    total_spending = sum(expense.amount for expense in expenses)
+    expense_count = len(expenses)
+    highest_expense = max(
+        (expense.amount for expense in expenses),
+        default=0
+    )
+
+    by_category = {}
+
+    for expense in expenses:
+        if expense.category not in by_category:
+            by_category[expense.category] = 0
+
+        by_category[expense.category] += expense.amount
+    return {
+        "total_spending": total_spending,
+        "expense_count": expense_count,
+        "highest_expense": highest_expense,
+        "by_category": by_category
+    }
 
 @router.get("/{expense_id}", response_model=ExpenseResponse)
 def get_expense(
